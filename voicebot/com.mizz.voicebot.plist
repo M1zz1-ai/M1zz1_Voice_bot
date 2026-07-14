@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mizz.voicebot</string>
+
+  <!-- Launch the installed .app binary directly -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/VoiceBot.app/Contents/MacOS/VoiceBot</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- KeepAlive=false ON PURPOSE: a KeepAlive agent relaunching alongside a
+       manual launch caused duplicate menu-bar icons. RunAtLoad handles
+       start-at-login; the single-instance guard is only a backstop. -->
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- __HOME__ is replaced with the current user's $HOME at install time
+       (install.sh / the Settings "Start at login" toggle) — no hardcoded
+       per-user paths ship in the repo. -->
+  <key>StandardOutPath</key>
+  <string>__HOME__/.voicebot/logs/launchd_stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.voicebot/logs/launchd_stderr.log</string>
+</dict>
+</plist>

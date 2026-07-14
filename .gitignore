@@ -1,0 +1,28 @@
+# Build / test virtualenvs
+.build_venv/
+.test_venv/
+.venv/
+venv/
+
+# PyInstaller build output
+build/
+dist/
+*.dmg
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secrets / local env
+.env
+.env.*
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# macOS
+.DS_Store

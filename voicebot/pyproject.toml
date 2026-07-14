@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mizz-voicebot"
+version = "2.0.0"
+description = "macOS menu bar voice-to-text via local Apple MLX Whisper"
+requires-python = ">=3.10"
+dependencies = [
+    "rumps>=0.4.0",
+    "sounddevice>=0.4.6",
+    "scipy>=1.11.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "pyobjc-framework-Cocoa>=9.0",
+    "huggingface_hub>=0.24.0",
+    "mlx>=0.20.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-whisper>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[project.scripts]
+voicebot = "main:main"
