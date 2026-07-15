@@ -231,23 +231,30 @@ class VoiceBot(rumps.App):
         """Live-mode end-of-recording flush: re-transcribe the full buffer
         and paste anything the streaming loop didn't commit."""
         self._set_state("processing")
+        terminal = False
         try:
             self._live.finalize(audio)
+            full = self._live.committed
+            if full:
+                self._last_text_item.title = f"Last: {full[:40]}..."
+                self._sounds.play("success")
+                self._overlay.set_state("success")
+                self._play_success_anim()
+            else:
+                self._sounds.play("error")
+                self._set_state("error", "Empty transcription")
+            terminal = True
         except Exception:
             logger.exception("live finalize failed")
             self._sounds.play("error")
             self._set_state("error", "Live finalize error")
-            return
-
-        full = self._live.committed
-        if full:
-            self._last_text_item.title = f"Last: {full[:40]}..."
-            self._sounds.play("success")
-            self._overlay.set_state("success")
-            self._play_success_anim()
-        else:
-            self._sounds.play("error")
-            self._set_state("error", "Empty transcription")
+            terminal = True
+        finally:
+            # Never leave the app pinned in "processing": if we somehow fell
+            # through without a terminal state, force back to idle.
+            if not terminal:
+                logger.error("live finalize: no terminal state reached — idle")
+                self._set_state("idle")
 
     def _play_success_anim(self):
         success_frames = self._anims.get_frames("success")

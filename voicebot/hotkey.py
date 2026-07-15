@@ -17,6 +17,8 @@ fast — defer heavy work to a thread.
 
 import ctypes
 import logging
+
+import AppKit
 from ctypes import (
     CFUNCTYPE, POINTER, Structure,
     c_int32, c_uint32, c_uint64, c_void_p,
@@ -261,7 +263,13 @@ class CarbonHotkey:
         def _handler(_call_ref, _event_ref, _user):
             try:
                 if self._callback:
-                    self._callback()
+                    # Carbon dispatches this handler OUTSIDE AppKit's run-loop
+                    # turn, so AppKit window ordering done inline here never
+                    # flushes to the WindowServer. Hop onto the main queue so
+                    # the callback runs on a real AppKit turn.
+                    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                        self._callback
+                    )
             except Exception:
                 logger.exception("Hotkey callback raised")
             return noErr

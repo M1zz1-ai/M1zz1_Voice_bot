@@ -168,6 +168,10 @@ STATE_READY       = "ready"
 STATE_TRANSCRIBING = "transcribing"
 STATE_ERROR       = "error"
 
+# Max wait for the inference lock on the non-inline (finalize/one-shot) path.
+# A legit prior transcribe is short; exceeding this means the holder is stuck.
+_INFER_LOCK_TIMEOUT = 90.0
+
 
 def _hf_cache_dir(repo):
     """Where huggingface_hub stores `repo` on disk."""
@@ -545,7 +549,16 @@ class WhisperEngine:
                 logger.debug("live transcribe skipped: inference busy")
                 return None
         else:
-            self._infer_lock.acquire()
+            # Bounded wait: never block forever behind a stuck inline
+            # inference that failed to release the lock — that deadlock left
+            # the app pinned in "processing" (and the overlay stuck) for hours.
+            if not self._infer_lock.acquire(timeout=_INFER_LOCK_TIMEOUT):
+                logger.error(
+                    "transcribe: inference lock held >%.0fs (stuck inline "
+                    "inference?) — abandoning to avoid deadlock",
+                    _INFER_LOCK_TIMEOUT,
+                )
+                return None
 
         if not inline:
             self._set_state(STATE_TRANSCRIBING)

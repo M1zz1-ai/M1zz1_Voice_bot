@@ -41,7 +41,12 @@ import time
 
 import AppKit
 import objc
-from Foundation import NSMakeRect, NSThread
+from Foundation import (
+    NSMakeRect,
+    NSRunLoop,
+    NSRunLoopCommonModes,
+    NSThread,
+)
 
 logger = logging.getLogger("voicebot.overlay")
 
@@ -114,6 +119,7 @@ class GlowOverlayView(AppKit.NSView):
         self._bursting = False
         self._burst_elapsed = 0.0
         self._tick_errors = 0
+        self._draw_div = 0          # redraw throttle counter (processing)
         self._on_finish = None      # controller callback → force hide
         return self
 
@@ -200,6 +206,12 @@ class GlowOverlayView(AppKit.NSView):
                 self._force_hide()
                 return
 
+        # Perf mercy on the 8GB Air: redraw at ~5fps while "processing"
+        # (GIL-bound MLX inference starves a 20fps Python tick). Animation
+        # state still advances every tick, so motion is preserved.
+        self._draw_div = (self._draw_div + 1) % 4
+        if self._state == "processing" and self._draw_div != 0:
+            return
         self.setNeedsDisplay_(True)
 
     @objc.python_method
@@ -290,6 +302,7 @@ class Overlay:
         self._panel = None
         self._view = None
         self._timer = None
+        self._watchdog = None
         self._visible = False
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -333,16 +346,9 @@ class Overlay:
         panel.setBackgroundColor_(AppKit.NSColor.clearColor())
         panel.setHasShadow_(False)
         panel.setIgnoresMouseEvents_(True)
-        panel.setLevel_(AppKit.NSStatusWindowLevel)
-        panel.setFloatingPanel_(True)
         panel.setBecomesKeyOnlyIfNeeded_(True)
         panel.setHidesOnDeactivate_(False)
-        panel.setCollectionBehavior_(
-            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
-            | AppKit.NSWindowCollectionBehaviorStationary
-            | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
-            | AppKit.NSWindowCollectionBehaviorIgnoresCycle
-        )
+        self._apply_behavior(panel)
 
         view = GlowOverlayView.alloc().initWithFrame_(
             NSMakeRect(0, 0, f.size.width, band_h)
@@ -353,6 +359,21 @@ class Overlay:
         self._panel = panel
         self._view = view
         return True
+
+    def _apply_behavior(self, panel):
+        # setFloatingPanel_(True) forces the level down to NSFloatingWindowLevel,
+        # so assert the intended NSStatusWindowLevel AFTER it. CanJoinAllSpaces
+        # is level-independent, but it is only reliably honoured while the panel
+        # actually carries the behaviour — so re-assert it on every show, since
+        # a Space switch can otherwise leave the panel pinned to one Space.
+        panel.setFloatingPanel_(True)
+        panel.setLevel_(AppKit.NSStatusWindowLevel)
+        panel.setCollectionBehavior_(
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+            | AppKit.NSWindowCollectionBehaviorStationary
+            | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+            | AppKit.NSWindowCollectionBehaviorIgnoresCycle
+        )
 
     def _start_timer(self):
         if self._timer is not None:
@@ -366,14 +387,54 @@ class Overlay:
             self._timer.invalidate()
             self._timer = None
 
+    # ── Independent watchdog ──────────────────────────────────────────────
+    # Decoupled from the drawing timer: if tick_ starves (heavy load), this
+    # still force-hides on the ceiling. Runs in NSRunLoopCommonModes so modal
+    # / event-tracking run-loop modes don't pause it.
+
+    def _start_watchdog(self):
+        if self._watchdog is not None:
+            return
+        t = AppKit.NSTimer.timerWithTimeInterval_repeats_block_(
+            0.5, True, lambda _t: self._watchdog_fire(),
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(t, NSRunLoopCommonModes)
+        self._watchdog = t
+
+    def _stop_watchdog(self):
+        if self._watchdog is not None:
+            self._watchdog.invalidate()
+            self._watchdog = None
+
+    def _watchdog_fire(self):
+        v = self._view
+        if v is None or not self._visible:
+            return
+        state = v._state
+        if state == "recording":
+            return
+        elapsed = time.monotonic() - v._state_since
+        limit = (_WATCHDOG_PROCESSING if state == "processing"
+                 else _WATCHDOG_NONRECORDING)
+        if elapsed > limit:
+            logger.warning(
+                "overlay watchdog (independent): force-hide "
+                "(state=%s, %.1fs > %.1fs)", state, elapsed, limit,
+            )
+            self._hide_impl()
+
     def _show_impl(self):
         if not self._ensure_panel():
             return
+        # Re-assert level + Spaces behaviour every show — a prior Space switch
+        # or level change can drop CanJoinAllSpaces / the intended level.
+        self._apply_behavior(self._panel)
         self._view.reset_for_recording()
         # orderFrontRegardless never steals focus (unlike makeKeyAndOrderFront).
         self._panel.orderFrontRegardless()
         self._visible = True
         self._start_timer()
+        self._start_watchdog()
 
     def _set_state_impl(self, state):
         if not self._visible:
@@ -384,6 +445,7 @@ class Overlay:
 
     def _hide_impl(self):
         self._stop_timer()
+        self._stop_watchdog()
         if self._panel is not None:
             self._panel.orderOut_(None)
         self._visible = False
