@@ -120,6 +120,7 @@ class GlowOverlayView(AppKit.NSView):
         self._burst_elapsed = 0.0
         self._tick_errors = 0
         self._draw_div = 0          # redraw throttle counter (processing)
+        self._tick_count = 0        # ticks since last show (telemetry)
         self._on_finish = None      # controller callback → force hide
         return self
 
@@ -165,6 +166,7 @@ class GlowOverlayView(AppKit.NSView):
     # ── Per-frame update (ObjC timer target) ──────────────────────────────
 
     def tick_(self, timer):
+        self._tick_count += 1
         try:
             self._tick_body()
             self._tick_errors = 0
@@ -305,6 +307,14 @@ class Overlay:
         self._watchdog = None
         self._visible = False
 
+        # Session telemetry (logged on every hide).
+        self._show_t = 0.0
+        self._state_changes = 0
+
+        # Sleep/wake + display-reconfig observers (registered lazily on show).
+        self._observers = []
+        self._observers_registered = False
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def show(self):
@@ -424,12 +434,16 @@ class Overlay:
             self._hide_impl()
 
     def _show_impl(self):
+        self._register_display_observers()
         if not self._ensure_panel():
             return
         # Re-assert level + Spaces behaviour every show — a prior Space switch
         # or level change can drop CanJoinAllSpaces / the intended level.
         self._apply_behavior(self._panel)
         self._view.reset_for_recording()
+        self._view._tick_count = 0
+        self._show_t = time.monotonic()
+        self._state_changes = 0
         # orderFrontRegardless never steals focus (unlike makeKeyAndOrderFront).
         self._panel.orderFrontRegardless()
         self._visible = True
@@ -441,19 +455,86 @@ class Overlay:
             # Burst/processing without a prior show — bring it up first.
             self._show_impl()
         if self._view is not None:
+            self._state_changes += 1
             self._view.set_state(state)
 
     def _hide_impl(self):
+        was_visible = self._visible
         self._stop_timer()
         self._stop_watchdog()
         if self._panel is not None:
             self._panel.orderOut_(None)
         self._visible = False
+        if was_visible:
+            self._log_session()
+
+    def _log_session(self):
+        elapsed = max(1e-6, time.monotonic() - self._show_t)
+        ticks = getattr(self._view, "_tick_count", 0) if self._view else 0
+        logger.info(
+            "overlay session: %d state changes, avg tick fps=%.1f",
+            self._state_changes, ticks / elapsed,
+        )
 
     def _on_view_finished(self):
         # Called from the view's tick_ (main thread) on burst-complete,
         # watchdog trip, or repeated tick errors.
         self._hide_impl()
+
+    # ── Sleep/wake + display reconfiguration ──────────────────────────────
+    # The panel + view are created once with the then-current NSScreen frame.
+    # After a sleep/wake or a display change the panel can be stale (wrong
+    # frame/space/backing) and the animation "falls" — so we drop it and let
+    # the next show() recreate it fresh, or recreate in place if visible.
+
+    def _register_display_observers(self):
+        if self._observers_registered:
+            return
+        self._observers_registered = True
+        try:
+            ws = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
+            tok1 = ws.addObserverForName_object_queue_usingBlock_(
+                "NSWorkspaceDidWakeNotification", None, None,
+                lambda note: self._on_display_change(),
+            )
+            nc = AppKit.NSNotificationCenter.defaultCenter()
+            tok2 = nc.addObserverForName_object_queue_usingBlock_(
+                AppKit.NSApplicationDidChangeScreenParametersNotification,
+                None, None, lambda note: self._on_display_change(),
+            )
+            self._observers = [tok1, tok2]
+        except Exception:
+            logger.exception("overlay: failed to register display observers")
+
+    def _on_display_change(self):
+        logger.info(
+            "overlay: display/wake change — refreshing panel (visible=%s)",
+            self._visible,
+        )
+        _run_on_main(self._recreate_for_display_change)
+
+    def _recreate_for_display_change(self):
+        if not self._visible:
+            # Not on screen: just drop the stale panel; next show() rebuilds it.
+            self._drop_panel()
+            return
+        # Visible mid-recording: recreate in place, preserving the state.
+        state = self._view._state if self._view is not None else "recording"
+        self._hide_impl()
+        self._drop_panel()
+        self._show_impl()
+        if state != "recording" and self._view is not None:
+            self._view.set_state(state)
+
+    def _drop_panel(self):
+        panel = self._panel
+        self._panel = None
+        self._view = None
+        if panel is not None:
+            try:
+                panel.orderOut_(None)
+            except Exception:
+                pass
 
 
 # ── Dev entrypoint ────────────────────────────────────────────────────────────

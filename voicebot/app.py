@@ -139,7 +139,38 @@ class VoiceBot(rumps.App):
         self._install_hotkey()
 
         self._refresh_status_label()
+        # Resolve mic TCC without opening a stream (never blocks; the parent is
+        # CoreAudio-free). Undetermined → async prompt; denied → status text.
+        self._resolve_microphone()
         logger.info("VoiceBot ready")
+
+    def _resolve_microphone(self):
+        try:
+            from permissions import (
+                microphone_status,
+                request_microphone_access,
+            )
+        except Exception:
+            logger.exception("permissions import failed")
+            return
+
+        denied_title = "⚠️ Microphone denied — System Settings › Privacy"
+        status = microphone_status()
+        logger.info(f"Microphone authorization: {status}")
+        if status == "denied":
+            self._on_main(
+                lambda: setattr(self._status_item, "title", denied_title))
+        elif status == "undetermined":
+            def done(granted):
+                logger.info("Microphone access %s",
+                            "granted" if granted else "denied")
+                if granted:
+                    self._on_main(self._refresh_status_label)
+                else:
+                    self._on_main(
+                        lambda: setattr(self._status_item, "title",
+                                        denied_title))
+            request_microphone_access(done)
 
     # ── Hotkey management ──────────────────────────────────────────────────
 
@@ -573,6 +604,14 @@ class VoiceBot(rumps.App):
         subprocess.run(["open", "-a", "Console", log_file], check=False)
 
     def _restart(self, _):
+        # Spawn a detached relauncher that fires AFTER we exit, then quit.
+        # (`open -b` on a live instance would only focus it, not respawn.)
+        import relaunch
+        try:
+            self._hotkey.unregister()
+        except Exception:
+            pass
+        relaunch.relaunch_detached()
         rumps.quit_application()
 
     def _quit_forever(self, _):

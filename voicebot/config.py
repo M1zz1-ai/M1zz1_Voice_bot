@@ -8,7 +8,7 @@ import os
 
 # Single source of truth for the app version. build_app.sh injects this into
 # the bundle's CFBundleShortVersionString / CFBundleVersion.
-VERSION = "2.1.1"
+VERSION = "2.1.4"
 
 CONFIG_DIR = os.path.expanduser("~/.voicebot")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")

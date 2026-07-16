@@ -14,7 +14,7 @@ sys.path.insert(0, _bundle_dir)
 
 from config import Config
 from logger_setup import setup_logger
-from permissions import check_accessibility, check_microphone, show_alert
+from permissions import check_accessibility, show_alert
 
 BUNDLE_ID = "com.mizz.voicebot"
 
@@ -123,16 +123,10 @@ def main():
     logger.info(f"Config: {cfg.config_file}")
     logger.info(f"Whisper model: {cfg['whisper_model']}")
 
-    # Check permissions
-    if not check_microphone():
-        show_alert(
-            "VoiceBot — Микрофон",
-            "Нет доступа к микрофону.\n\n"
-            "Системные настройки → Конфиденциальность и безопасность → Микрофон\n"
-            "Включите тумблер рядом с VoiceBot."
-        )
-        logger.error("Microphone access denied")
-        sys.exit(1)
+    # Microphone: NEVER block startup on it. The parent no longer opens any
+    # audio stream (that wedged inside Pa_OpenStream); the app resolves TCC
+    # status asynchronously via AVFoundation and surfaces "denied" in the menu
+    # bar. Capture happens only in the recorder's child process.
 
     if not check_accessibility():
         show_alert(

@@ -2,6 +2,35 @@
 
 All notable changes to VoiceBot are documented here.
 
+## [2.1.3] — 2026-07-16
+
+### Fixed
+- **Startup no longer hangs on the microphone probe.** The parent process is
+  now 100% PortAudio/CoreAudio-free: `permissions.check_microphone` no longer
+  opens an `InputStream` (which could wedge inside `Pa_OpenStream`). Mic TCC
+  status is queried via AVFoundation (`AVCaptureDevice.authorizationStatus…`)
+  and the consent prompt is triggered asynchronously — the menu bar comes up
+  first and mic status resolves in the background, surfacing "denied" in the
+  status item. Audio capture happens only in the recorder's child process.
+
+## [2.1.2] — 2026-07-16
+
+### Fixed
+- **Restart menu item now actually restarts.** It previously only quit. It now
+  spawns a detached relauncher (`sh -c 'sleep 1; open -b …'`, new session) that
+  fires after the old process exits, then quits.
+- **Overlay animation surviving sleep/wake and display changes.** The overlay
+  panel was created once for the original screen and reused forever, going
+  stale after wake or a display reconfiguration. It now subscribes to
+  `NSWorkspaceDidWakeNotification` and
+  `NSApplicationDidChangeScreenParametersNotification` and drops the panel
+  (recreating it fresh on next show, or in place if visible mid-recording).
+
+### Added
+- **Overlay telemetry** — one INFO line per recording on hide:
+  `overlay session: <n> state changes, avg tick fps=<n>`, to catch a starved
+  animation tick timer.
+
 ## [2.1.1] — 2026-07-16
 
 ### Fixed
@@ -51,3 +80,6 @@ All notable changes to VoiceBot are documented here.
 - **Live-mode lag / vanishing overlay squares** — sliding-window transcription
   bounds per-poll inference to ~2s regardless of dictation length; finalize
   reconciles only the tail window without duplicating text.
+
+## 2.1.4 — 2026-07-17
+- No functional changes: TCC-persistence verification release (stable signing identity test).
