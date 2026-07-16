@@ -92,11 +92,7 @@ class VoiceBot(rumps.App):
         self._transcriber = Transcriber(engine=self._engine, language=lang)
 
         # ── Audio ────────────────────────────────────────────────────────
-        self._recorder = AudioRecorder(
-            sample_rate=cfg["sample_rate"],
-            max_duration=cfg["max_duration_seconds"],
-            on_auto_stop=self._on_auto_stop,
-        )
+        self._recorder = self._new_recorder()
 
         # ── UX modules ───────────────────────────────────────────────────
         self._settings_window = SettingsWindow(
@@ -165,41 +161,120 @@ class VoiceBot(rumps.App):
 
     # ── Recording toggle ───────────────────────────────────────────────────
 
+    def _new_recorder(self):
+        """Construct a fresh AudioRecorder (own lock, own stream). Called at
+        startup and whenever the previous instance is retired as dead."""
+        return AudioRecorder(
+            sample_rate=self.cfg["sample_rate"],
+            max_duration=self.cfg["max_duration_seconds"],
+            on_auto_stop=self._on_auto_stop,
+        )
+
+    def _replace_recorder(self):
+        """Retire the current recorder and swap in a fresh one. A recorder
+        whose stop() wedged inside CoreAudio holds its lock forever; we never
+        touch that instance again."""
+        self._recorder.mark_dead()
+        self._recorder = self._new_recorder()
+        self._live._recorder = self._recorder
+        logger.info("Replaced AudioRecorder with a fresh instance")
+
     def _toggle_recording(self):
+        # Hotkey callback on the MAIN thread — only read state and spawn a
+        # worker. NEVER call into PortAudio here (start OR stop): CoreAudio can
+        # deadlock and would freeze the menu bar + hotkey forever.
         logger.info(f"Hotkey triggered. is_recording={self._recorder.is_recording}")
         if not self._recorder.is_recording:
-            self._start_recording()
+            threading.Thread(target=self._start_worker, daemon=True).start()
         else:
             self._stop_and_send()
 
-    def _start_recording(self):
-        if self._recorder.start():
-            # Lazy-load weights into MLX while the user speaks. By the time
-            # they stop, the ModelHolder cache is hot and transcribe() skips
-            # the ~3 s cold weight-load that used to happen on first dictation.
-            self._engine.kickoff_warmup()
-            if self.cfg.get("live_mode"):
-                self._live.start()
-            self._sounds.play("start")
-            self._set_state("recording")
-        else:
-            self._sounds.play("error")
-            self._set_state("error", "Microphone unavailable")
+    def _start_worker(self):
+        """Background start path — never runs on the main thread (see
+        _toggle_recording). Swaps in a fresh recorder if the current one is a
+        zombie from a timed-out stop."""
+        if self._recorder.is_dead:
+            self._replace_recorder()
+
+        if not self._recorder.start():
+            # A failed start can mean a wedged previous stop still holds the
+            # old lock (start() times out on it) or a genuinely unavailable
+            # mic. Swap in a clean recorder and try exactly once more.
+            self._replace_recorder()
+            if not self._recorder.start():
+                self._sounds.play("error")
+                self._set_state("error", "Microphone unavailable")
+                return
+
+        # Lazy-load weights into MLX while the user speaks. By the time they
+        # stop, the ModelHolder cache is hot and transcribe() skips the ~3 s
+        # cold weight-load that used to happen on first dictation.
+        self._engine.kickoff_warmup()
+        if self.cfg.get("live_mode"):
+            self._live.start()
+        self._sounds.play("start")
+        self._set_state("recording")
 
     def _stop_and_send(self):
+        # Runs on the MAIN thread (the hotkey callback is marshalled onto
+        # mainQueue). Calling recorder.stop()/live.stop() here can deadlock
+        # inside CoreAudio — an AB-BA lock between the main thread's
+        # AudioOutputUnitStop and the audio IO thread's startStopCallback —
+        # freezing the menu bar and hotkey forever. So the main thread only
+        # snapshots state and hands the whole stop→transcribe path to a worker.
         live_was_on = self.cfg.get("live_mode") and self._recorder.is_recording
+        pre_stop_audio = self._recorder.snapshot()
+        threading.Thread(
+            target=self._stop_worker, args=(live_was_on, pre_stop_audio),
+            daemon=True,
+        ).start()
+
+    def _stop_worker(self, live_was_on, pre_stop_audio):
+        """Background stop path — never runs on the main thread (see
+        _stop_and_send). Stops live polling and the recorder, then
+        transcribes."""
         if live_was_on:
             self._live.stop()
 
-        audio = self._recorder.stop()
+        audio = self._stop_recorder_guarded(pre_stop_audio)
         self._sounds.play("stop")
 
         if audio is None:
             self._set_state("idle")
             return
 
-        target = self._finalize_live if live_was_on else self._transcribe_and_paste
-        threading.Thread(target=target, args=(audio,), daemon=True).start()
+        if live_was_on:
+            self._finalize_live(audio)
+        else:
+            self._transcribe_and_paste(audio)
+
+    def _stop_recorder_guarded(self, pre_stop_audio, timeout=10.0):
+        """Call recorder.stop() with a hard timeout. PortAudio can deadlock
+        inside FinishStoppingStream; if stop() hasn't returned within
+        `timeout`, log and fall back to the pre-stop snapshot (audio frames
+        live in Python lists and stay readable) so we still transcribe what was
+        captured."""
+        result = {}
+
+        def _run():
+            result["audio"] = self._recorder.stop()
+
+        worker = threading.Thread(target=_run, daemon=True, name="recorder-stop")
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            logger.error(
+                "recorder.stop() did not return within %.0fs — likely a "
+                "CoreAudio deadlock; retiring this recorder and continuing "
+                "with the pre-stop snapshot",
+                timeout,
+            )
+            # The stuck worker holds this recorder's lock forever; retire the
+            # instance so the next start() builds a fresh one (never blocks on
+            # the zombie lock).
+            self._replace_recorder()
+            return pre_stop_audio
+        return result.get("audio")
 
     def _on_auto_stop(self, audio):
         """Called from recorder when max duration reached."""
@@ -219,7 +294,10 @@ class VoiceBot(rumps.App):
 
         if text:
             self._paster.paste(text)
-            self._last_text_item.title = f"Last: {text[:40]}..."
+            self._on_main(
+                lambda: setattr(self._last_text_item, "title",
+                                f"Last: {text[:40]}...")
+            )
             self._sounds.play("success")
             self._overlay.set_state("success")
             self._play_success_anim()
@@ -236,7 +314,10 @@ class VoiceBot(rumps.App):
             self._live.finalize(audio)
             full = self._live.committed
             if full:
-                self._last_text_item.title = f"Last: {full[:40]}..."
+                self._on_main(
+                    lambda: setattr(self._last_text_item, "title",
+                                    f"Last: {full[:40]}...")
+                )
                 self._sounds.play("success")
                 self._overlay.set_state("success")
                 self._play_success_anim()
@@ -258,21 +339,26 @@ class VoiceBot(rumps.App):
 
     def _play_success_anim(self):
         success_frames = self._anims.get_frames("success")
-        if success_frames:
+        if not success_frames:
+            self._set_state("idle")
+            return
+
+        # Timer start + frame/icon mutation must happen on the main thread.
+        def start_frames():
             self._stop_anim()
             self._current_frames = success_frames
             self._frame_idx = 0
             self._anim_timer.start()
             self._animating = True
 
-            def finish():
-                import time
-                time.sleep(len(success_frames) / max(self.cfg["anim_fps"], 1))
-                self._set_state("idle")
+        self._on_main(start_frames)
 
-            threading.Thread(target=finish, daemon=True).start()
-        else:
+        def finish():
+            import time
+            time.sleep(len(success_frames) / max(self.cfg["anim_fps"], 1))
             self._set_state("idle")
+
+        threading.Thread(target=finish, daemon=True).start()
 
     # ── Engine state callback ──────────────────────────────────────────────
 
@@ -296,7 +382,7 @@ class VoiceBot(rumps.App):
                 detail = state.get("detail", "Model failed")
                 self._status_item.title = f"⚠ {detail[:60]}"
 
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(update)
+        self._on_main(update)
 
     # ── Animation ──────────────────────────────────────────────────────────
 
@@ -332,48 +418,62 @@ class VoiceBot(rumps.App):
         else:
             self._status_item.title = f"Loading {self.cfg['whisper_model']}…"
 
+    def _on_main(self, fn):
+        """Run `fn` on the main thread's run loop.
+
+        AppKit/rumps UI mutation from a background thread can SIGTRAP while the
+        status menu is open (setTitle → menu resize → NSWindow setFrame). Every
+        UI touch-point funnels through here so callers may run on any worker.
+        """
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(fn)
+
     def _set_state(self, state, detail=""):
-        hotkey_label = self._current_hotkey_label()
-        model = self.cfg["whisper_model"]
+        """Apply a UI state. Self-marshalling: AppKit/rumps mutation must run
+        on the main thread, so this is safe to call from any worker thread."""
+        def apply():
+            hotkey_label = self._current_hotkey_label()
+            model = self.cfg["whisper_model"]
 
-        labels = {
-            "idle":       f"Idle — {hotkey_label} ({model})",
-            "recording":  f"🎙 Recording... ({hotkey_label} to stop)",
-            "processing": f"⏳ Processing… ({model})",
-            "error":      f"⚠️ {detail}",
-        }
-        self._status_item.title = labels.get(state, "")
+            labels = {
+                "idle":       f"Idle — {hotkey_label} ({model})",
+                "recording":  f"🎙 Recording... ({hotkey_label} to stop)",
+                "processing": f"⏳ Processing… ({model})",
+                "error":      f"⚠️ {detail}",
+            }
+            self._status_item.title = labels.get(state, "")
 
-        if state == "idle":
-            self._stop_anim()
-            self.icon = ICON_IDLE
-            self.title = ""
-            self._overlay.hide()
-        elif state == "recording":
-            self._start_anim("recording")
-            self._overlay.show()
-        elif state == "processing":
-            self._stop_anim()
-            self._start_anim("processing")
-            self._overlay.set_state("processing")
-        elif state == "error":
-            self._stop_anim()
-            self._overlay.set_state("error")
-            error_frames = self._anims.get_frames("error")
-            if error_frames:
-                self._current_frames = error_frames
-                self._frame_idx = 0
-                self._anim_timer.start()
-                self._animating = True
+            if state == "idle":
+                self._stop_anim()
+                self.icon = ICON_IDLE
+                self.title = ""
+                self._overlay.hide()
+            elif state == "recording":
+                self._start_anim("recording")
+                self._overlay.show()
+            elif state == "processing":
+                self._stop_anim()
+                self._start_anim("processing")
+                self._overlay.set_state("processing")
+            elif state == "error":
+                self._stop_anim()
+                self._overlay.set_state("error")
+                error_frames = self._anims.get_frames("error")
+                if error_frames:
+                    self._current_frames = error_frames
+                    self._frame_idx = 0
+                    self._anim_timer.start()
+                    self._animating = True
 
-            self.title = "⚠️"
+                self.title = "⚠️"
 
-            def clear_error():
-                import time
-                time.sleep(4.0)
-                self._set_state("idle")
+                def clear_error():
+                    import time
+                    time.sleep(4.0)
+                    self._set_state("idle")
 
-            threading.Thread(target=clear_error, daemon=True).start()
+                threading.Thread(target=clear_error, daemon=True).start()
+
+        self._on_main(apply)
 
     # ── Menu callbacks ─────────────────────────────────────────────────────
 
