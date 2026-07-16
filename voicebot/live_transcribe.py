@@ -88,13 +88,17 @@ def _trim_to_boundary(text):
 
 class LiveTranscriber:
     def __init__(self, recorder, engine, paster, sample_rate=16000,
-                 poll_seconds=1.5, stability_runs=2):
+                 poll_seconds=1.5, stability_runs=2, gate=None):
         self._recorder = recorder
         self._engine = engine
         self._paster = paster
         self._sample_rate = sample_rate
         self._poll = float(poll_seconds)
         self._stability = max(2, int(stability_runs))
+        # Context-aware output gate. None → always type (legacy / tests).
+        # Commits still accumulate into `_committed` while silent, so nothing
+        # is lost; only the paster.type_text/backspace calls are gated.
+        self._gate = gate
 
         self._window_samples = int(_WINDOW_SECONDS * sample_rate)
 
@@ -112,6 +116,15 @@ class LiveTranscriber:
     @property
     def committed(self):
         return self._committed
+
+    @property
+    def output_silent(self):
+        """True if this recording has fallen back to silent (clipboard-only)."""
+        return bool(self._gate and self._gate.is_silent)
+
+    def _may_type(self):
+        """Per-commit focus check. No gate → always type (legacy)."""
+        return self._gate is None or self._gate.allow_typing()
 
     def start(self):
         """Begin polling. The recorder must already be running."""
@@ -176,10 +189,11 @@ class LiveTranscriber:
         to_delete = len(self._committed) - len(common)
         to_type = text[len(common):]
 
-        if to_delete > 0:
-            self._paster.backspace(to_delete)
-        if to_type:
-            self._paster.type_text(to_type)
+        if self._may_type():
+            if to_delete > 0:
+                self._paster.backspace(to_delete)
+            if to_type:
+                self._paster.type_text(to_type)
 
         self._committed = text
         self._window_committed = text
@@ -208,7 +222,8 @@ class LiveTranscriber:
         overlap = _suffix_prefix_overlap(self._committed, text)
         to_type = text[overlap:]
         if to_type:
-            self._paster.type_text(to_type)
+            if self._may_type():
+                self._paster.type_text(to_type)
             self._committed += to_type
             self._window_committed += to_type
         logger.info(
@@ -278,7 +293,8 @@ class LiveTranscriber:
                         stable = self._window_committed + delta
 
                 if delta:
-                    self._paster.type_text(delta)
+                    if self._may_type():
+                        self._paster.type_text(delta)
                     self._committed += delta
                     self._window_committed = stable
                     logger.info(f"live committed +{len(delta)} chars")

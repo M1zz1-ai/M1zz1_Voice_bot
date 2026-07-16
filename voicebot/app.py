@@ -34,6 +34,7 @@ from hotkey import (
     cocoa_mods_to_carbon,
     format_shortcut,
 )
+from focus import FocusProber, OutputGate
 from live_transcribe import LiveTranscriber
 from overlay import Overlay
 from paster import TextPaster
@@ -51,6 +52,9 @@ import sys as _sys
 _BASE_DIR = getattr(_sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(_BASE_DIR, "assets")
 ICON_IDLE = os.path.join(ASSETS_DIR, "icon_idle.png")
+
+# Status-bar hint shown after a silent-mode dictation (text is clipboard-only).
+_CLIP_HINT = "📋 In clipboard — ⌘V"
 
 
 class VoiceBot(rumps.App):
@@ -104,6 +108,14 @@ class VoiceBot(rumps.App):
         self._anims = AnimationGenerator()
         self._overlay = Overlay()
 
+        # Context-aware output. The gate probes the focused UI element (AX) on
+        # the worker/live thread and decides type-vs-silent per commit, sticky
+        # per recording. Reset at every recording start in _start_worker.
+        self._focus_prober = FocusProber()
+        self._output_gate = OutputGate(
+            self._focus_prober, smart_typing=cfg.get("smart_typing", True),
+        )
+
         # Live (streaming) transcription. Always instantiated; started only
         # when cfg["live_mode"] is true at hotkey-press time.
         self._live = LiveTranscriber(
@@ -113,6 +125,7 @@ class VoiceBot(rumps.App):
             sample_rate=cfg["sample_rate"],
             poll_seconds=cfg.get("live_poll_seconds", 1.5),
             stability_runs=cfg.get("live_stability_runs", 2),
+            gate=self._output_gate,
         )
 
         # Animation state
@@ -206,6 +219,10 @@ class VoiceBot(rumps.App):
                 self._set_state("error", "Microphone unavailable")
                 return
 
+        # Fresh output-mode decision per recording (clears sticky-silent),
+        # picking up the current smart_typing setting.
+        self._output_gate.reset(self.cfg.get("smart_typing", True))
+
         # Lazy-load weights into MLX while the user speaks. By the time they
         # stop, the ModelHolder cache is hot and transcribe() skips the ~3 s
         # cold weight-load that used to happen on first dictation.
@@ -293,14 +310,21 @@ class VoiceBot(rumps.App):
         text = self._transcriber.transcribe(audio, self.cfg["sample_rate"])
 
         if text:
-            self._paster.paste(text)
+            # Context-aware: type into the focused field only if it's editable;
+            # otherwise stay silent. Either way the full text lands on the
+            # clipboard (paste() sets it; copy() sets it without ⌘V).
+            silent = not self._output_gate.allow_typing()
+            if silent:
+                self._paster.copy(text)
+            else:
+                self._paster.paste(text)
             self._on_main(
                 lambda: setattr(self._last_text_item, "title",
                                 f"Last: {text[:40]}...")
             )
             self._sounds.play("success")
             self._overlay.set_state("success")
-            self._play_success_anim()
+            self._play_success_anim(hint=_CLIP_HINT if silent else None)
         else:
             self._sounds.play("error")
             self._set_state("error", "Transcription error")
@@ -314,13 +338,17 @@ class VoiceBot(rumps.App):
             self._live.finalize(audio)
             full = self._live.committed
             if full:
+                # Always leave the full transcription on the clipboard for ⌘V
+                # (recovery path in typed mode, primary path in silent mode).
+                self._paster.copy(full)
+                silent = self._live.output_silent
                 self._on_main(
                     lambda: setattr(self._last_text_item, "title",
                                     f"Last: {full[:40]}...")
                 )
                 self._sounds.play("success")
                 self._overlay.set_state("success")
-                self._play_success_anim()
+                self._play_success_anim(hint=_CLIP_HINT if silent else None)
             else:
                 self._sounds.play("error")
                 self._set_state("error", "Empty transcription")
@@ -337,10 +365,13 @@ class VoiceBot(rumps.App):
                 logger.error("live finalize: no terminal state reached — idle")
                 self._set_state("idle")
 
-    def _play_success_anim(self):
+    def _play_success_anim(self, hint=None):
+        """Success flash. If `hint` is given (silent output mode), show it in
+        the status item for ~4s after the flash so the user knows the text is
+        on the clipboard for ⌘V, then settle to idle."""
         success_frames = self._anims.get_frames("success")
         if not success_frames:
-            self._set_state("idle")
+            self._success_to_idle(hint)
             return
 
         # Timer start + frame/icon mutation must happen on the main thread.
@@ -356,9 +387,32 @@ class VoiceBot(rumps.App):
         def finish():
             import time
             time.sleep(len(success_frames) / max(self.cfg["anim_fps"], 1))
-            self._set_state("idle")
+            self._success_to_idle(hint)
 
         threading.Thread(target=finish, daemon=True).start()
+
+    def _success_to_idle(self, hint):
+        if not hint:
+            self._set_state("idle")
+            return
+
+        # Silent mode: settle the icon/overlay but keep a "clipboard" hint in
+        # the status item for ~4s (marshalled on the main thread), then idle.
+        def show_hint():
+            self._stop_anim()
+            self.icon = ICON_IDLE
+            self.title = ""
+            self._overlay.hide()
+            self._status_item.title = hint
+
+        self._on_main(show_hint)
+
+        def to_idle():
+            import time
+            time.sleep(4.0)
+            self._set_state("idle")
+
+        threading.Thread(target=to_idle, daemon=True).start()
 
     # ── Engine state callback ──────────────────────────────────────────────
 

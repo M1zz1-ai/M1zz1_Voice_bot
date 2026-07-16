@@ -340,7 +340,7 @@ class SettingsWindow:
 
         # ── General ───────────────────────────────────────────────────────
         y = self._section_title(content, "General", y)
-        rows = 5
+        rows = 6
         gen_h = CARD_INSET_Y * 2 + rows * ROW_H + (rows - 1) * ROW_GAP
         card, y = self._card(content, y, gen_h)
         cy = gen_h - CARD_INSET_Y - ROW_H  # bottom of top row
@@ -376,6 +376,11 @@ class SettingsWindow:
         )
         self._controls["start_at_login"] = self._toggle(
             card, "Start at login", PAD + 250, cy + 2,
+        )
+        cy -= ROW_H + ROW_GAP
+
+        self._controls["smart_typing"] = self._toggle(
+            card, "Smart typing (only into text fields)", PAD, cy + 2,
         )
 
         # ── Transcription ────────────────────────────────────────────────
@@ -476,6 +481,10 @@ class SettingsWindow:
             NSControlStateValueOn if cfg.get("live_mode", True)
             else NSControlStateValueOff
         )
+        self._controls["smart_typing"].setState_(
+            NSControlStateValueOn if cfg.get("smart_typing", True)
+            else NSControlStateValueOff
+        )
 
         import autostart
         self._controls["start_at_login"].setState_(
@@ -525,6 +534,8 @@ class SettingsWindow:
                               == NSControlStateValueOn,
             "live_mode": self._controls["live_mode"].state()
                          == NSControlStateValueOn,
+            "smart_typing": self._controls["smart_typing"].state()
+                            == NSControlStateValueOn,
             "whisper_model": str(self._controls["whisper_model"].titleOfSelectedItem()),
         })
         cfg.save()

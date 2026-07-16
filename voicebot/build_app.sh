@@ -30,7 +30,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="VoiceBot"
-APP_VERSION="2.0.0"
+# Single source of truth — read the version from config.VERSION.
+APP_VERSION="$(cd "$(dirname "$0")" && python3 -c 'import config; print(config.VERSION)' 2>/dev/null || echo "0.0.0")"
 BUNDLE_ID="com.mizz.voicebot"
 APP_PATH="$SCRIPT_DIR/dist/$APP_NAME.app"
 DMG_PATH="$SCRIPT_DIR/dist/$APP_NAME-$APP_VERSION.dmg"
@@ -114,18 +115,38 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 echo "✅ Built: $APP_PATH"
 
-# ── Codesign (ad-hoc) ─────────────────────────────────────────────────────────
-# Ad-hoc signing gives the bundle a stable identity in macOS's TCC
-# (Microphone + Accessibility) database. For TRUE production distribution
-# (no Gatekeeper warning), replace `--sign -` with a Developer ID + notarize.
-
-echo "🔏 Codesigning ad-hoc..."
-codesign --force --deep --sign - \
+# ── Codesign ──────────────────────────────────────────────────────────────────
+# Prefer a persistent local self-signed identity so the signing identity (and
+# thus the code's designated requirement) is STABLE across rebuilds — macOS
+# then keeps Microphone/Accessibility grants instead of resetting them every
+# build. Falls back to ad-hoc (grants reset each build) with a loud warning.
+#
+# No hardened runtime (`--options runtime`): it breaks PyInstaller + ctypes
+# system-framework loading (focus.py / AX). Entitlements are still applied.
+SIGN_ID="VoiceBot Dev Signing"
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+    echo "🔏 Codesigning with persistent identity: $SIGN_ID"
+    SIGN_ARG="$SIGN_ID"
+else
+    echo "⚠️  ================================================================"
+    echo "⚠️  Persistent identity '$SIGN_ID' NOT FOUND — falling back to AD-HOC."
+    echo "⚠️  Microphone/Accessibility grants WILL RESET on this build."
+    echo "⚠️  Create it once (Keychain Access → Certificate Assistant → Create"
+    echo "⚠️  a Certificate → name 'VoiceBot Dev Signing', type Code Signing,"
+    echo "⚠️  self-signed) so future builds keep their TCC grants."
+    echo "⚠️  ================================================================"
+    SIGN_ARG="-"
+fi
+echo "🔏 Codesigning ($SIGN_ARG)..."
+codesign --force --deep --sign "$SIGN_ARG" \
     --entitlements "$SCRIPT_DIR/entitlements.plist" \
-    --options runtime \
     "$APP_PATH" 2>&1 | grep -v "replacing existing signature" || true
 
-codesign --verify --deep --strict "$APP_PATH" && echo "✅ Codesign verified"
+codesign --verify --deep --strict "$APP_PATH" \
+    && echo "✅ Codesign verified" \
+    || echo "⚠️  Codesign verify reported issues (expected for untrusted self-signed)"
+codesign -dv "$APP_PATH" 2>&1 | grep -iE "Authority|Signature=|Identifier=" \
+    | sed 's/^/   /' || true
 
 # ── Clean up stale installs (avoid double menu-bar icons) ─────────────────────
 # A leftover KeepAlive LaunchAgent or an old bundle can silently run a second

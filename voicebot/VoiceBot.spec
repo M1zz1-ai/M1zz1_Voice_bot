@@ -5,11 +5,16 @@ Build: cd voicebot && /opt/homebrew/bin/python3.10 -m PyInstaller --clean VoiceB
 """
 
 import os
+import sys
 from PyInstaller.utils.hooks import (
     collect_data_files,
     collect_dynamic_libs,
     collect_submodules,
 )
+
+# Single source of truth for the version — injected into the bundle Info.plist.
+sys.path.insert(0, os.path.dirname(os.path.abspath(SPECPATH)))
+from config import VERSION
 
 block_cipher = None
 
@@ -145,8 +150,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleDisplayName': 'VoiceBot',
         'CFBundleName': 'VoiceBot',
-        'CFBundleShortVersionString': '2.0.0',
-        'CFBundleVersion': '2.0.0',
+        'CFBundleShortVersionString': VERSION,
+        'CFBundleVersion': VERSION,
         'CFBundleIdentifier': 'com.mizz.voicebot',
         'CFBundleExecutable': 'VoiceBot',
         'CFBundleIconFile': 'VoiceBot.icns',

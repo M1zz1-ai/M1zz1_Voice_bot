@@ -6,6 +6,10 @@
 import json
 import os
 
+# Single source of truth for the app version. build_app.sh injects this into
+# the bundle's CFBundleShortVersionString / CFBundleVersion.
+VERSION = "2.1.1"
+
 CONFIG_DIR = os.path.expanduser("~/.voicebot")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +40,15 @@ DEFAULTS = {
     "auto_paste": True,
     "sounds_enabled": True,
     "anim_fps": 8,
+
+    # Context-aware output (OPT-IN, default off). When enabled: before each
+    # live commit, probe the focused UI element via Accessibility and only type
+    # into a real editable field; non-editable / no focus / password field →
+    # silent (collect internally, leave the full text on the clipboard for ⌘V),
+    # sticky per recording. When off (default): always type (legacy), except
+    # password fields are still never typed into. Either way, the full
+    # transcription is always left on the clipboard at the end of a recording.
+    "smart_typing": False,
 
     # Live (streaming) mode: while recording, transcribe the buffer every
     # `live_poll_seconds` and paste any text that's been stable for

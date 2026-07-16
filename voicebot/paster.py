@@ -46,6 +46,17 @@ class TextPaster:
 
         logger.info(f"Pasted: {text[:60]}...")
 
+    def copy(self, text):
+        """Put text on the clipboard WITHOUT pasting it.
+
+        The ⌘V recovery path: used at the end of every dictation (and for
+        silent output mode) so the full transcription is always available even
+        when nothing was typed into a field.
+        """
+        self.last_text = text
+        self._set_clipboard(text)
+        logger.info(f"Copied to clipboard: {text[:60]}...")
+
     def _set_clipboard(self, text):
         try:
             self._pb.clearContents()

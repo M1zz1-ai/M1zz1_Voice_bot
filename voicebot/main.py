@@ -61,9 +61,36 @@ def _demo_overlay():
     logger.info("Overlay demo finished")
 
 
+def _probe_focus():
+    """Self-test: print the raw focus probe once per second for 15s.
+
+    NOTE ON TCC: AX attribution follows the *responsible* process. Launching
+    the bundle binary from a terminal may attribute to the terminal, so if the
+    terminal lacks Accessibility every probe is denied. We print
+    AXIsProcessTrusted() first so the output is interpretable.
+    """
+    import time
+
+    from focus import FocusProber
+    prober = FocusProber()
+    trusted = prober.is_trusted()
+    print(f"AXIsProcessTrusted={trusted}  "
+          f"(if False, grant Accessibility to THIS process or run the app)",
+          flush=True)
+    for i in range(15):
+        info = prober.probe_info()
+        print(f"[{i:2d}] state={info['state']:<8} role={info['role']!r} "
+              f"subrole={info['subrole']!r} settable={info['settable']} "
+              f"err={info['err']} app={info['app']!r}", flush=True)
+        time.sleep(1)
+
+
 def main():
     if "--demo-overlay" in sys.argv:
         _demo_overlay()
+        return
+    if "--probe-focus" in sys.argv:
+        _probe_focus()
         return
 
     log_dir = os.path.expanduser("~/.voicebot/logs")
@@ -76,8 +103,9 @@ def main():
         sys.stderr = open(os.path.join(log_dir, "voicebot_stderr.log"), "a", buffering=1)
 
     logger = setup_logger()
+    from config import VERSION
     logger.info("=" * 50)
-    logger.info("VoiceBot starting...")
+    logger.info(f"VoiceBot v{VERSION} starting...")
 
     # Single-instance guard — refuse to launch a second copy (avoids the
     # double menu-bar icon when a LaunchAgent and a manual launch collide).
